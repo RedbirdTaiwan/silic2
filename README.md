@@ -4,6 +4,7 @@ Sound identification and labeling pipeline for audio and video recordings.
 
 ## Species & Sound class Coverage
 - [./model/v2026.1](./model/v2026.1) , including 398 sound classes of 279 species, updated on Aug. 2026
+  - 特別感謝吳昭頤、陳惇聿及楊懿如老師和海蟾蜍監測團隊提供蛙類聲音資料，以及翁國精老師及鄭佳馨同學提供珍貴的小鼯鼠及其他飛鼠的聲音資料。
 
 ## Setup
 
