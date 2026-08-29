@@ -307,7 +307,7 @@ class Silic:
         self.soundclasses = pd.read_csv(
             self.model_path.replace('best.pt', 'soundclass.csv'),
             encoding='utf8',
-            index_col='sounclass_id'
+            index_col='soundclass_id'
         ).T.to_dict()
     #print(self.model.names)
     if targetfilepath and os.path.exists(targetfilepath):
@@ -609,7 +609,7 @@ def _init_worker(weights: str):
   G_SILIC.soundclasses = pd.read_csv(
       G_SILIC.model_path.replace('best.pt', 'soundclass.csv'),
       encoding='utf8',
-      index_col='sounclass_id'
+      index_col='soundclass_id'
   ).T.to_dict()
 
 def _write_raven_table(labels, target_path):
@@ -797,7 +797,7 @@ def browser(source, model="", step=1500, targetclasses='', conf_thres=0.1, savep
     model_obj.soundclasses = pd.read_csv(
         model_obj.model_path.replace('best.pt', 'soundclass.csv'),
         encoding='utf8',
-        index_col='sounclass_id'
+        index_col='soundclass_id'
     ).T.to_dict()
 
     total = len(abs_files)
@@ -835,12 +835,12 @@ def browser(source, model="", step=1500, targetclasses='', conf_thres=0.1, savep
   df_classes = pd.read_csv(weights.replace('best.pt', 'soundclass.csv'))
   if len(targetclasses) > 0:
     targetclasses = [int(item) for item in targetclasses.split(',')]
-    df_classes = df_classes[df_classes['sounclass_id'].isin(targetclasses)]
+    df_classes = df_classes[df_classes['soundclass_id'].isin(targetclasses)]
   else:
     names = all_labels['classid'].unique()
-    df_classes = df_classes[df_classes['sounclass_id'].isin(names)]
+    df_classes = df_classes[df_classes['soundclass_id'].isin(names)]
   sounds = {
-      str(row['sounclass_id']): [row['species_name'], row['sound_class'], row['scientific_name']]
+      str(row['soundclass_id']): [row['species_name'], row['sound_class'], row['scientific_name']]
       for _, row in df_classes.iterrows()
   }
   with open(os.path.join(js_path, 'soundclass.js'), 'w', newline='', encoding='utf-8') as csv_file:

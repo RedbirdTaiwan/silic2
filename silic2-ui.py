@@ -19,7 +19,7 @@ def read_target_class_ids(csv_path):
     """Read target IDs, accepting both the public and legacy model column names."""
     df = pd.read_csv(csv_path, encoding='utf-8-sig')
     id_column = next(
-        (column for column in ('soundclass_id', 'soundclassid', 'sounclass_id') if column in df.columns),
+        (column for column in ('soundclass_id', 'soundclassid', 'soundclass_id') if column in df.columns),
         None,
     )
     if id_column is None:
@@ -112,9 +112,9 @@ def main():
         df = pd.read_csv(class_path, lineterminator='\n', encoding="utf-8")
         df = df.sort_values(by=['species_name', 'sound_class'])
         for _, row in df.iterrows():
-            key = f"{row['sounclass_id']}: {row['species_name']}({row['scientific_name']}) {row['sound_class']}"
+            key = f"{row['soundclass_id']}: {row['species_name']}({row['scientific_name']}) {row['sound_class']}"
             classes[key] = {
-                'sounclass_id': row['sounclass_id'],
+                'soundclass_id': row['soundclass_id'],
                 'species_name': row['species_name'],
                 'sound_class': row['sound_class'],
                 'scientific_name': row['scientific_name']
@@ -138,7 +138,7 @@ def main():
         for item in selected:
             sound_class = classes[item]
             records.append({
-                'soundclass_id': sound_class['sounclass_id'],
+                'soundclass_id': sound_class['soundclass_id'],
                 'species_name': sound_class['species_name'],
                 'sound_class': sound_class['sound_class'],
                 'scientific_name': sound_class['scientific_name'],
@@ -164,7 +164,7 @@ def main():
             return
 
         id_to_item = {
-            str(int(sound_class['sounclass_id'])): item
+            str(int(sound_class['soundclass_id'])): item
             for item, sound_class in classes.items()
         }
         matched_ids = [soundclass_id for soundclass_id in imported_ids if soundclass_id in id_to_item]
@@ -255,7 +255,7 @@ def main():
         selected_ids = []
         if listbox1.get(0, tk.END):
             for item in listbox1.get(0, tk.END):
-                selected_ids.append(str(classes[item]['sounclass_id']))
+                selected_ids.append(str(classes[item]['soundclass_id']))
 
         # Clear log and reset progress bar
         text.delete("1.0", tk.END)
