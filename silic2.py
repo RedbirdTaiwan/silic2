@@ -297,7 +297,7 @@ class Silic:
     fh = self.mel_to_freq(1-(y-h/2))
     return [ts, te, fl, fh]
 
-  def detect(self, weights, step=1500, conf_thres=0.1, imgsz=640, targetfilepath=None, iou_thres=0.25, targetclasses=None):
+  def detect(self, weights, step=1500, conf_thres=0.1, imgsz=480, targetfilepath=None, iou_thres=0.25, targetclasses=None):
     if self.model and self.model_path == weights:
         pass
     else:
