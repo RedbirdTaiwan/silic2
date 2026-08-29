@@ -32,9 +32,4 @@ desktop interface with:
 python silic2-ui.py
 ```
 
-## Test
-
-```powershell
-python -m unittest discover -s tests -v
-```
 
