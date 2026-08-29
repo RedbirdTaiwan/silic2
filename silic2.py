@@ -1,14 +1,27 @@
 # -*- coding: utf-8 -*-
-import numpy as np, pandas as pd, torch, cv2, os, time, shutil, warnings, argparse, mimetypes
+import argparse
+import json
+import mimetypes
+import os
+import shutil
+import time
+import warnings
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
+import cv2
+import numpy as np
+import pandas as pd
+import torch
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 from matplotlib import cm
 from pydub import AudioSegment, effects, scipy_effects
-from pydub.utils import mediainfo
 from nnAudio import features
 import scipy.signal as signal
 from ultralytics import YOLO
 from PIL import ImageFont, ImageDraw, Image
+
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def speed_change(sound, speed=1.0):
     # Manually override the frame_rate. This tells the computer how many
@@ -45,20 +58,21 @@ def calculate_rms(audio_segment):
 
 def AudioStandarize(audio_file, sr=32000, device=None, high_pass=0, ultrasonic=False):
   if not device:
-    device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+      device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
   filext = os.path.splitext(audio_file)[1].lower()[1:]
-  if filext == "mp3":
-      sound = AudioSegment.from_mp3(audio_file)
-  elif filext == "ogg":
-      sound = AudioSegment.from_ogg(audio_file)
-  elif filext == "wav":
-      sound = AudioSegment.from_wav(audio_file)
-  else:
+  try:
+      sound = AudioSegment.from_file(audio_file)
+  except Exception:
       try:
-          sound = AudioSegment.from_file(audio_file)
-      except:
-        print(f'Sorry, cannot open your file with extension {filext}.')
-        return None
+          if filext == "mp3":
+              sound = AudioSegment.from_mp3(audio_file)
+          elif filext == "ogg":
+              sound = AudioSegment.from_ogg(audio_file)
+          else:
+              sound = AudioSegment.from_wav(audio_file)
+      except Exception:
+          print(f'Sorry, cannot open your file with extension {filext}.')
+          return None
   original_metadata = {'channel': sound.channels, 'sample_rate':sound.frame_rate, 'sample_size':len(sound.get_array_of_samples()), 'duration':sound.duration_seconds}
   print('Origional audio: channel = %s, sample_rate = %s Hz, sample_size = %s, duration = %s s' %(original_metadata['channel'], original_metadata['sample_rate'], original_metadata['sample_size'], original_metadata['duration']))
   if ultrasonic:
@@ -80,7 +94,7 @@ def AudioStandarize(audio_file, sr=32000, device=None, high_pass=0, ultrasonic=F
           sound = left_channel
         else:
           sound = right_channel
-      except:
+      except Exception:
         sound = left_channel
   if not sound.sample_width == 2:
       sound = sound.set_sample_width(2)
@@ -94,6 +108,15 @@ def AudioStandarize(audio_file, sr=32000, device=None, high_pass=0, ultrasonic=F
   return sound.frame_rate, audiodata, duration, sound, original_metadata
 
 def get_media_files(directory):
+  if os.path.isfile(directory):
+    mime_type, _ = mimetypes.guess_type(directory)
+    if mime_type and (mime_type.startswith('audio') or mime_type.startswith('video')):
+      return [os.path.basename(directory)]
+    return []
+
+  if not os.path.isdir(directory):
+    return []
+
   media_files = []
 
   for filename in os.listdir(directory):
@@ -146,8 +169,12 @@ class Silic:
     self.audiofilename_without_ext = os.path.splitext(self.audiofilename)[0]
     self.audiopath = os.path.dirname(audio_file)
     self.audiofileext = audio_file.split('.')[-1]
-    self.sr, self.audiodata, self.duration, self.sound, self.original_metadata = AudioStandarize(audio_file, self.sr, self.device, high_pass=self.fmin, ultrasonic=ultrasonic)
+    standardized = AudioStandarize(audio_file, self.sr, self.device, high_pass=self.fmin, ultrasonic=ultrasonic)
+    if standardized is None or standardized is False:
+      raise ValueError(f'Unable to standardize audio file: {audio_file}')
+    self.sr, self.audiodata, self.duration, self.sound, self.original_metadata = standardized
     self.original_sound = AudioSegment.from_file(audio_file)
+    self.analysis_audio = self.original_sound.split_to_mono()[0] if self.original_sound.channels > 1 else self.original_sound
 
   def save_standarized(self, targetmp3path=None):
     if not targetmp3path:
@@ -218,16 +245,15 @@ class Silic:
       targetfilepath = os.path.join(self.audiopath, spect_type, '%s.png'%self.audiofilename_without_ext)
       if not os.path.isdir(os.path.dirname(targetfilepath)):
         os.makedirs(os.path.dirname(targetfilepath))
-    if not os.path.isdir(os.path.dirname(targetfilepath)):
-      print('Error! Cannot find the target folder %s.' %os.path.dirname(targetfilepath))
-      exit()
+    target_dir = os.path.dirname(targetfilepath) or '.'
+    if not os.path.isdir(target_dir):
+      raise FileNotFoundError(f'Cannot find the target folder {target_dir}.')
     if (stop - start)/1000*self.sr > (max_sample_size):
         if not os.path.exists('tmp'):
             try:
                 os.makedirs('tmp')
-            except:
-                print('Cannot create tmp folder!')
-                exit()
+            except OSError as exc:
+                raise OSError('Cannot create tmp folder!') from exc
         
         imgs = []
         for ts in range(int(round(start/1000*self.sr)), int(round(stop/1000*self.sr)-self.sr*0.1), max_sample_size):
@@ -237,9 +263,8 @@ class Silic:
               data = self.audiodata[ts:ts+max_sample_size]
             try:
               imgs.append(self.spectrogram(data, spect_type, rainbow_bands=rainbow_bands))
-            except:
-              print('error in converting')
-              exit()
+            except Exception as exc:
+              raise RuntimeError('Error while converting the spectrogram') from exc
         self.cv2_img = cv2.hconcat(imgs)
     else:
         self.cv2_img = self.spectrogram(self.audiodata[int(round(start/1000*self.sr)):int(round(stop/1000*self.sr))], spect_type, rainbow_bands=rainbow_bands)
@@ -252,7 +277,7 @@ class Silic:
     PILimage = Image.fromarray(self.cv2_img)
     try:
       PILimage.save(targetfilepath, dpi=(72,72))
-    except:
+    except OSError:
       targetfilepath = '%spng' %targetfilepath[:-3]
       PILimage.save(targetfilepath, dpi=(72,72))
     print('Spectrogram was saved to %s.'%targetfilepath)
@@ -272,7 +297,7 @@ class Silic:
     fh = self.mel_to_freq(1-(y-h/2))
     return [ts, te, fl, fh]
 
-  def detect(self, weights, step=1000, conf_thres=0.1, imgsz=640, targetfilepath=None, iou_thres=0.25, targetclasses=None):
+  def detect(self, weights, step=1500, conf_thres=0.1, imgsz=640, targetfilepath=None, iou_thres=0.25, targetclasses=None):
     if self.model and self.model_path == weights:
         pass
     else:
@@ -285,34 +310,38 @@ class Silic:
             index_col='sounclass_id'
         ).T.to_dict()
     #print(self.model.names)
-    if os.path.exists(targetfilepath):
+    if targetfilepath and os.path.exists(targetfilepath):
         self.rainbow_img = np.array(Image.open(targetfilepath).convert("RGB"))[:, :, ::-1]
     else:
         self.tfr(targetfilepath=targetfilepath, spect_type='rainbow')
 
-    dataset = []
-    for ts in range(0, self.duration, step):
-        clip_start = round(ts/self.duration*self.rainbow_img.shape[1])
-        clip_end = clip_start+round(self.clip_length/self.duration*self.rainbow_img.shape[1])
-        if clip_end > self.rainbow_img.shape[1]:
-            _silence = np.full((self.rainbow_img.shape[0], clip_end-self.rainbow_img.shape[1], 3), 255).astype('uint8')
-            _rainbow_img = np.append(self.rainbow_img, _silence, axis=1)
-            img0 = _rainbow_img[:, clip_start:clip_end]
-            dataset.append([os.path.join(self.audiopath, self.audiofilename), img0, ts])
-            break
-        img0 = self.rainbow_img[:, clip_start:clip_end]
-        dataset.append([os.path.join(self.audiopath, self.audiofilename), img0, ts])
+    def iter_clips():
+        """Yield one spectrogram window at a time to keep memory bounded."""
+        for ts in range(0, self.duration, step):
+            clip_start = round(ts/self.duration*self.rainbow_img.shape[1])
+            clip_end = clip_start+round(self.clip_length/self.duration*self.rainbow_img.shape[1])
+            if clip_end > self.rainbow_img.shape[1]:
+                missing_width = clip_end - self.rainbow_img.shape[1]
+                silence = np.full((self.rainbow_img.shape[0], missing_width, 3), 255, dtype=np.uint8)
+                img0 = np.concatenate((self.rainbow_img[:, clip_start:], silence), axis=1)
+                yield os.path.join(self.audiopath, self.audiofilename), img0, ts
+                break
+            yield (
+                os.path.join(self.audiopath, self.audiofilename),
+                self.rainbow_img[:, clip_start:clip_end],
+                ts,
+            )
 
     labels = [['file', 'classid', 'species_name', 'sound_class', 'scientific_name',
                "time_begin", "time_end", "freq_low", "freq_high", "score",
                "average_power_density", "SNR"]]
-    if len(targetclasses) > 0:
+    if targetclasses:
         id2name = self.model.names
         name2id = {v: k for k, v in id2name.items()}
         classes = [name2id[item] for item in targetclasses.split(',')]
     else:
         classes = None
-    for path, im0, time_start in dataset:
+    for path, im0, time_start in iter_clips():
         results = self.model.predict(source=im0, imgsz=imgsz, conf=conf_thres, iou=iou_thres, verbose=False, classes=classes, device=self.device)
 
         for r in results:
@@ -334,15 +363,17 @@ class Silic:
                 sound_class = self.soundclasses[classid]['sound_class']
                 scientific_name = self.soundclasses[classid]['scientific_name']
 
-                audio = AudioSegment.from_file(os.path.join(self.audiopath, self.audiofilename))
-                if audio.channels == 2:
-                    audio = audio.split_to_mono()[0]
-
                 try:
                     with warnings.catch_warnings():
                         warnings.simplefilter("ignore", category=RuntimeWarning)
-                        average_power_density_dbfs, snr_db = signal_power(audio, ts/1000, te/1000, fl, fh)
-                except:
+                        average_power_density_dbfs, snr_db = signal_power(
+                            self.analysis_audio,
+                            (time_start + ts) / 1000,
+                            (time_start + te) / 1000,
+                            fl,
+                            fh,
+                        )
+                except (ValueError, ZeroDivisionError):
                     average_power_density_dbfs = 'error'
                     snr_db = 'error'
 
@@ -368,18 +399,25 @@ def signal_power(audio, start_time, end_time, low_freq, high_freq):
   start_sample = int(start_time * sr)
   end_sample = int(end_time * sr)
   y_segment = samples[start_sample:end_sample]
+  if y_segment.size < 2:
+    return 'error', 'error'
 
   # 設定特定頻率範圍（例如 300-3000 Hz）
   nyquist = 0.5 * sr
   low = low_freq / nyquist
   high = high_freq / nyquist
+  low = max(float(low), 1e-6)
+  high = min(float(high), 1 - 1e-6)
+  if low >= high:
+    return 'error', 'error'
 
   # 設計帶通濾波器
   b, a = signal.butter(4, [low, high], btype='band')
   filtered_signal = signal.lfilter(b, a, y_segment)
 
   # 計算功率密度譜
-  f, Pxx = signal.welch(y_segment, sr, nperseg=1024)
+  nperseg = min(1024, y_segment.size)
+  f, Pxx = signal.welch(y_segment, sr, nperseg=nperseg)
 
   # 選擇特定頻率範圍內的功率密度
   freq_mask = (f >= low_freq) & (f <= high_freq)
@@ -387,6 +425,8 @@ def signal_power(audio, start_time, end_time, low_freq, high_freq):
 
   # 計算特定頻率範圍內的平均功率密度
   average_power_density = np.mean(Pxx_in_band)
+  if not np.isfinite(average_power_density) or average_power_density <= 0:
+    return 'error', 'error'
 
   # 根據 bit depth 計算最大可能振幅
   max_possible_amplitude = 2 ** (bit_depth - 1)
@@ -400,6 +440,8 @@ def signal_power(audio, start_time, end_time, low_freq, high_freq):
   # 假設噪聲（這裡用信號減去濾波後的信號作為噪聲估計）
   noise = y_segment - filtered_signal
   noise_power = np.mean(noise**2)
+  if not np.isfinite(signal_power) or not np.isfinite(noise_power) or signal_power <= 0 or noise_power <= 0:
+    return 'error', 'error'
 
   # 計算 SNR（以分貝為單位）
   snr_db = 10 * np.log10(signal_power / noise_power)
@@ -468,24 +510,27 @@ def merge_boxes(bb1, bb2):
     y2 = bb2['y2']
   return {'x1':x1, 'x2':x2, 'y1':y1, 'y2':y2}
 
-def clean_multi_boxes(audiofile, labels, threshold_iou=0.1, threshold_iratio=0.25):
+def clean_multi_boxes(audiofile, labels, threshold_iou=0.1, threshold_iratio=0.25, audio=None):
   df = pd.DataFrame(labels[1:],columns=labels[0])
+  for col in ['average_power_density', 'SNR']:
+    if col in df.columns:
+      df[col] = df[col].astype(object)
   df = df.sort_values('time_begin')
   df_results = pd.DataFrame()
   soundclasses = df['classid'].unique()
-  audio = AudioSegment.from_file(audiofile)
-  if audio.channels == 2:
+  if audio is None:
+    audio = AudioSegment.from_file(audiofile)
+  if audio.channels > 1:
       audio = audio.split_to_mono()[0]  # 轉換為單聲道
   for classid in soundclasses:
     df_class = df[df['classid']==classid].reset_index(drop=True)
     for i in range(0, df_class.shape[0]):
       check = True
       bb1 = {'x1':df_class.loc[i, 'time_begin'], 'x2':df_class.loc[i, 'time_end'], 'y1':df_class.loc[i, 'freq_low'], 'y2':df_class.loc[i, 'freq_high']}
-      score1 = df_class.loc[i, 'score']
-      j = 0
       for j in range(i+1, df_class.shape[0]):
         bb2 = {'x1':df_class.loc[j, 'time_begin'], 'x2':df_class.loc[j, 'time_end'], 'y1':df_class.loc[j, 'freq_low'], 'y2':df_class.loc[j, 'freq_high']}
-        score2 = df_class.loc[j, 'score']
+        if bb2['x1'] >= bb1['x2']:
+          break
         iou, i_ration_bb1, i_ration_bb2 = get_iou(bb1, bb2)
         i_ration = i_ration_bb1 if i_ration_bb1 > i_ration_bb2 else i_ration_bb2
         if iou >= threshold_iou or i_ration > threshold_iratio:
@@ -497,19 +542,16 @@ def clean_multi_boxes(audiofile, labels, threshold_iou=0.1, threshold_iratio=0.2
             with warnings.catch_warnings():
               warnings.simplefilter("ignore", category=RuntimeWarning)
               average_power_density, SNR = signal_power(audio, merge_box['x1']/1000, merge_box['x2']/1000, merge_box['y1'], merge_box['y2'])
-          except:
+          except (ValueError, ZeroDivisionError):
             average_power_density = 'error'
             SNR = 'error'
-          try:
-            df_class.loc[j, 'time_begin'] = merge_box['x1']
-            df_class.loc[j, 'time_end'] = merge_box['x2']
-            df_class.loc[j, 'freq_low'] = merge_box['y1']
-            df_class.loc[j, 'freq_high'] = merge_box['y2']
-            df_class.loc[j, 'score'] = score
-            df_class.loc[j, 'average_power_density'] = average_power_density
-            df_class.loc[j, 'SNR'] = SNR
-          except:
-            print(j, df_class.iloc[j])
+          df_class.loc[j, 'time_begin'] = merge_box['x1']
+          df_class.loc[j, 'time_end'] = merge_box['x2']
+          df_class.loc[j, 'freq_low'] = merge_box['y1']
+          df_class.loc[j, 'freq_high'] = merge_box['y2']
+          df_class.loc[j, 'score'] = score
+          df_class.loc[j, 'average_power_density'] = average_power_density
+          df_class.loc[j, 'SNR'] = SNR
           check = False
           break
       if check:
@@ -529,7 +571,7 @@ def draw_labels(silic, labels, outputpath=None):
   outputimage = silic.tfr()
   img_pil = Image.open(outputimage)
   width, height = img_pil.size
-  fontpath = "model/wt011.ttf"
+  fontpath = os.path.join(PROJECT_DIR, 'model', 'wt011.ttf')
   font = ImageFont.truetype(fontpath, 9)
   draw = ImageDraw.Draw(img_pil)
   for index, label in labels.iterrows():
@@ -542,29 +584,22 @@ def draw_labels(silic, labels, outputpath=None):
     draw.rectangle(((x1, y1), (x2, y2)), outline='red')
   try:
     img_pil.save(targetpath)
-  except:
+  except OSError:
     targetpath = '%spng' %targetpath[:-3]
     img_pil.save(targetpath)
   #img_pil.show()
   print(targetpath, 'saved')
   return targetpath
 
-# ======================
-# Multiprocessing support
-# ======================
-from concurrent.futures import ProcessPoolExecutor, as_completed
-
 # Worker-side globals to cache model per process
 G_SILIC = None
-G_WEIGHTS = None
 
 def _init_worker(weights: str):
   """
   Initializer that runs once per process. Pre-loads YOLO model into a Silic instance
   so each task in the same process reuses the model (big speed-up).
   """
-  global G_SILIC, G_WEIGHTS
-  G_WEIGHTS = weights
+  global G_SILIC
   G_SILIC = Silic()
   # Preload model
   from ultralytics import YOLO as _YOLO
@@ -577,78 +612,81 @@ def _init_worker(weights: str):
       index_col='sounclass_id'
   ).T.to_dict()
 
+def _write_raven_table(labels, target_path):
+  raven = labels.copy()
+  raven['Selection'] = range(1, len(raven) + 1)
+  raven['View'] = 'Spectrogram 1'
+  raven['Channel'] = '1'
+  raven['Begin Time (s)'] = raven['time_begin'] / 1000
+  raven['End Time (s)'] = raven['time_end'] / 1000
+  raven['Low Freq (Hz)'] = raven['freq_low']
+  raven['High Freq (Hz)'] = raven['freq_high']
+  raven['Delta Time (s)'] = raven['End Time (s)'] - raven['Begin Time (s)']
+  raven['Delta Freq (Hz)'] = raven['High Freq (Hz)'] - raven['Low Freq (Hz)']
+  raven['Avg Power Density (dB FS/Hz)'] = raven['average_power_density']
+  raven['Annotation'] = raven.apply(
+      lambda row: f"{row['species_name']} ({row['scientific_name']}) : "
+                  f"{row['sound_class']}, Score: {row['score']}",
+      axis=1,
+  )
+  columns = [
+      'Selection', 'View', 'Channel', 'Begin Time (s)', 'End Time (s)',
+      'Low Freq (Hz)', 'High Freq (Hz)', 'Delta Time (s)', 'Delta Freq (Hz)',
+      'Avg Power Density (dB FS/Hz)', 'Annotation',
+  ]
+  raven[columns].to_csv(target_path, index=False, sep='\t', encoding='big5', errors='ignore')
+
+def _run_one_file(silic, audiofile, result_paths, conf_thres, step, targetclasses):
+  """Process one recording; shared by serial and multiprocessing execution."""
+  linear_path, rainbow_path, label_path, raven_path, audio_path = result_paths
+  silic.audio(audiofile)
+
+  if audio_path:
+    target_audio = os.path.join(audio_path, silic.audiofilename)
+    if os.path.abspath(audiofile) != os.path.abspath(target_audio):
+      shutil.copy2(audiofile, target_audio)
+
+  linear_png = os.path.join(linear_path, silic.audiofilename_without_ext + '.png')
+  if not os.path.exists(linear_png):
+    silic.tfr(targetfilepath=linear_png, spect_type='linear')
+
+  rainbow_png = os.path.join(rainbow_path, silic.audiofilename_without_ext + '.png')
+  labels = silic.detect(
+      weights=silic.model_path,
+      step=step,
+      targetclasses=targetclasses,
+      conf_thres=conf_thres,
+      targetfilepath=rainbow_png,
+  )
+  if len(labels) == 1:
+    return {
+        'audiofile': audiofile, 'found': 0, 'species': 0, 'csv_path': None,
+        'message': f'No sound found in {audiofile}.',
+    }
+
+  newlabels = clean_multi_boxes(audiofile, labels, audio=silic.analysis_audio)
+  newlabels['file'] = silic.audiofilename
+  csv_path = os.path.join(label_path, silic.audiofilename_without_ext + '.csv')
+  newlabels.to_csv(csv_path, index=False, encoding='utf-8-sig')
+  raven_path_txt = os.path.join(raven_path, silic.audiofilename_without_ext + '_selections.txt')
+  _write_raven_table(newlabels, raven_path_txt)
+  species = int(newlabels['classid'].nunique())
+  return {
+      'audiofile': audiofile,
+      'found': int(newlabels.shape[0]),
+      'species': species,
+      'csv_path': csv_path,
+      'message': f'{newlabels.shape[0]} sounds of {species} species is/are found in {audiofile}',
+  }
+
 def _process_one_file(args):
   """
   Run full pipeline for a single file inside a worker process.
   Returns a dict summarizing results and path to per-file CSV (if any).
   """
   (audiofile, result_paths, conf_thres, step, targetclasses) = args
-  linear_path, rainbow_path, label_path, raven_path, audio_path = result_paths
-
   try:
-    silic = G_SILIC
-    silic.audio(audiofile)
-
-    # Copy original audio if requested and if different folder
-    if audio_path:
-      try:
-        import shutil as _shutil, os as _os
-        _shutil.copyfile(audiofile, _os.path.join(audio_path, silic.audiofilename))
-      except Exception:
-        pass
-
-    # Linear spectrogram (only if not already present)
-    linear_png = os.path.join(linear_path, silic.audiofilename_without_ext + '.png')
-    if not os.path.exists(linear_png):
-      silic.tfr(targetfilepath=linear_png, spect_type='linear')
-
-    # Rainbow spectrogram + detection
-    rainbow_png = os.path.join(rainbow_path, silic.audiofilename_without_ext + '.png')
-    labels = silic.detect(
-        weights=G_WEIGHTS, step=step, targetclasses=targetclasses,
-        conf_thres=conf_thres, targetfilepath=rainbow_png
-    )
-
-    if len(labels) == 1:
-      return {
-        'audiofile': audiofile,
-        'found': 0,
-        'species': 0,
-        'csv_path': None,
-        'message': f"No sound found in {audiofile}."
-      }
-
-    # Merge/clean overlapping boxes and save per-file outputs
-    newlabels = clean_multi_boxes(audiofile, labels)
-    newlabels['file'] = silic.audiofilename
-
-    csv_path = os.path.join(label_path, silic.audiofilename_without_ext + '.csv')
-    newlabels.to_csv(csv_path, index=False, encoding='utf-8-sig')
-
-    # Raven selection table
-    raven = newlabels.copy()
-    raven['Selection'] = range(1, len(raven) + 1)
-    raven['View'] = 'Spectrogram 1'
-    raven['Channel'] = '1'
-    raven['Begin Time (s)'] = raven['time_begin']/1000
-    raven['End Time (s)'] = raven['time_end']/1000
-    raven['Low Freq (Hz)'] = raven['freq_low']
-    raven['High Freq (Hz)'] = raven['freq_high']
-    raven['Delta Time (s)'] = raven['End Time (s)'] - raven['Begin Time (s)']
-    raven['Delta Freq (Hz)'] = raven['Low Freq (Hz)'] - raven['Low Freq (Hz)']
-    raven['Avg Power Density (dB FS/Hz)'] = raven['average_power_density']
-    raven['Annotation'] = raven.apply(lambda row: f"{row['species_name']} ({row['scientific_name']}) : {row['sound_class']}, Score: {row['score']}", axis=1)
-    raven = raven[['Selection','View','Channel','Begin Time (s)','End Time (s)','Low Freq (Hz)','High Freq (Hz)','Delta Time (s)','Delta Freq (Hz)','Avg Power Density (dB FS/Hz)','Annotation']]
-    raven_path_txt = os.path.join(raven_path, silic.audiofilename_without_ext + '_selections.txt')
-    raven.to_csv(raven_path_txt, index=False, sep='\t', encoding="big5", errors="ignore")
-
-    return {
-      'audiofile': audiofile,
-      'found': int(newlabels.shape[0]),
-      'species': int(len(newlabels['classid'].unique())),
-      'csv_path': csv_path,
-      'message': f"{newlabels.shape[0]} sounds of {len(newlabels['classid'].unique())} species is/are found in {audiofile}"
-    }
+    return _run_one_file(G_SILIC, audiofile, result_paths, conf_thres, step, targetclasses)
 
   except Exception as e:
     return {
@@ -659,7 +697,7 @@ def _process_one_file(args):
       'message': f"Error when processing {audiofile}: {str(e)}"
     }
 
-def browser(source, model="", step=1000, targetclasses='', conf_thres=0.1, savepath='result_silic', zip=False, workers=1, ui_callback=None, progress_cb=None):
+def browser(source, model="", step=1500, targetclasses='', conf_thres=0.1, savepath='result_silic', zip=False, workers=1, ui_callback=None, progress_cb=None):
   """
   Main pipeline used by both CLI and GUI. When workers > 1, run in parallel.
   ui_callback: optional callable(str) to stream progress messages back to GUI.
@@ -684,19 +722,21 @@ def browser(source, model="", step=1000, targetclasses='', conf_thres=0.1, savep
   if not targetclasses:
     targetclasses = ''
   elif isinstance(targetclasses, (list, tuple, np.ndarray)):
-    targetclasses = ",".join(targetclasses)
+    targetclasses = ",".join(str(item) for item in targetclasses)
   else:
-    targetclasses = targetclasses
+    targetclasses = str(targetclasses)
 
   t0 = time.time()
 
   # Prepare result directories
-  if savepath and os.path.isdir(savepath):
-    result_path = savepath
-  else:
-    result_path = 'result_silic'
+  result_path = savepath or 'result_silic'
 
-  if os.path.isdir(source) and source == savepath:
+  same_source_and_result = (
+      os.path.isdir(source)
+      and os.path.normcase(os.path.abspath(source))
+      == os.path.normcase(os.path.abspath(result_path))
+  )
+  if same_source_and_result:
     audio_path = None
   else:
     audio_path = os.path.join(result_path, 'audio')
@@ -713,7 +753,7 @@ def browser(source, model="", step=1000, targetclasses='', conf_thres=0.1, savep
 
   # Copy browser assets if available
   try:
-    shutil.copyfile('browser/index.html', os.path.join(result_path, 'index.html'))
+    shutil.copyfile(os.path.join(PROJECT_DIR, 'browser', 'index.html'), os.path.join(result_path, 'index.html'))
   except Exception:
     pass
 
@@ -725,9 +765,14 @@ def browser(source, model="", step=1000, targetclasses='', conf_thres=0.1, savep
   _log(f"SILIC Detector: {len(media_files)} files are found.")
   _progress(0, len(media_files))
 
-  weights = f'model/{model}/best.pt'
+  weights = os.path.join(PROJECT_DIR, 'model', model, 'best.pt')
+  if not os.path.isfile(weights):
+    raise FileNotFoundError(f'Model weights not found: {weights}')
   result_paths = (linear_path, rainbow_path, lable_path, raven_path, audio_path)
-  abs_files = [os.path.join(source, f) for f in media_files]
+  if os.path.isfile(source):
+    abs_files = [os.path.abspath(source)]
+  else:
+    abs_files = [os.path.join(source, f) for f in media_files]
 
   csv_paths = []
   if workers and workers > 1:
@@ -755,61 +800,16 @@ def browser(source, model="", step=1000, targetclasses='', conf_thres=0.1, savep
         index_col='sounclass_id'
     ).T.to_dict()
 
-    done = 0
     total = len(abs_files)
-    for audiofile in abs_files:
-      model_obj.audio(audiofile)
-      done += 1
+    for done, audiofile in enumerate(abs_files, start=1):
+      try:
+        res = _run_one_file(model_obj, audiofile, result_paths, conf_thres, step, targetclasses)
+      except Exception as exc:
+        res = {'csv_path': None, 'message': f'Error when processing {audiofile}: {exc}'}
       _progress(done, total)
-
-      # Copy original audio if requested
-      if audio_path:
-        try:
-          shutil.copyfile(audiofile, os.path.join(audio_path, model_obj.audiofilename))
-        except Exception:
-          pass
-
-      # Linear spectrogram
-      linear_png = os.path.join(linear_path, model_obj.audiofilename_without_ext + '.png')
-      if not os.path.exists(linear_png):
-        model_obj.tfr(targetfilepath=linear_png, spect_type='linear')
-
-      # Rainbow spectrogram + detection
-      rainbow_png = os.path.join(rainbow_path, model_obj.audiofilename_without_ext + '.png')
-      labels = model_obj.detect(
-          weights=weights, step=step, targetclasses=targetclasses,
-          conf_thres=conf_thres, targetfilepath=rainbow_png
-      )
-
-      if len(labels) == 1:
-        _log(f"No sound found in {audiofile}.")
-        continue
-
-      # Merge/clean overlapping boxes and save per-file outputs
-      newlabels = clean_multi_boxes(audiofile, labels)
-      newlabels['file'] = model_obj.audiofilename
-
-      csv_path = os.path.join(lable_path, model_obj.audiofilename_without_ext + '.csv')
-      newlabels.to_csv(csv_path, index=False, encoding='utf-8-sig')
-      csv_paths.append(csv_path)
-
-      raven = newlabels.copy()
-      raven['Selection'] = range(1, len(raven) + 1)
-      raven['View'] = 'Spectrogram 1'
-      raven['Channel'] = '1'
-      raven['Begin Time (s)'] = raven['time_begin']/1000
-      raven['End Time (s)'] = raven['time_end']/1000
-      raven['Low Freq (Hz)'] = raven['freq_low']
-      raven['High Freq (Hz)'] = raven['freq_high']
-      raven['Delta Time (s)'] = raven['End Time (s)'] - raven['Begin Time (s)']
-      raven['Delta Freq (Hz)'] = raven['Low Freq (Hz)'] - raven['Low Freq (Hz)']
-      raven['Avg Power Density (dB FS/Hz)'] = raven['average_power_density']
-      raven['Annotation'] = raven.apply(lambda row: f"{row['species_name']} ({row['scientific_name']}) : {row['sound_class']}, Score: {row['score']}", axis=1)
-      raven = raven[['Selection','View','Channel','Begin Time (s)','End Time (s)','Low Freq (Hz)','High Freq (Hz)','Delta Time (s)','Delta Freq (Hz)','Avg Power Density (dB FS/Hz)','Annotation']]
-      raven_path_txt = os.path.join(raven_path, model_obj.audiofilename_without_ext + '_selections.txt')
-      raven.to_csv(raven_path_txt, index=False, sep='\t', encoding="big5", errors="ignore")
-
-      _log(f"{newlabels.shape[0]} sounds of {len(newlabels['classid'].unique())} species is/are found in {audiofile}")
+      _log(res['message'])
+      if res.get('csv_path'):
+        csv_paths.append(res['csv_path'])
 
   # Aggregate results across files
   if not csv_paths:
@@ -839,19 +839,30 @@ def browser(source, model="", step=1000, targetclasses='', conf_thres=0.1, savep
   else:
     names = all_labels['classid'].unique()
     df_classes = df_classes[df_classes['sounclass_id'].isin(names)]
+  sounds = {
+      str(row['sounclass_id']): [row['species_name'], row['sound_class'], row['scientific_name']]
+      for _, row in df_classes.iterrows()
+  }
   with open(os.path.join(js_path, 'soundclass.js'), 'w', newline='', encoding='utf-8') as csv_file:
-    csv_file.write('var sounds = { \n')
-    for _, row in df_classes.iterrows():
-      csv_file.write(f'"{row["sounclass_id"]}": ["{row["species_name"]}", "{row["sound_class"]}", "{row["scientific_name"]}"], \n')
-    csv_file.write('};')
+    csv_file.write('var sounds = ')
+    json.dump(sounds, csv_file, ensure_ascii=False)
+    csv_file.write(';')
 
   with open(os.path.join(js_path, 'labels.js'), 'w', newline='', encoding='utf-8') as f:
-    f.write('var  labels  =  [' + '\n')
-    for _, label in all_labels.iterrows():
-      f.write("['{}', {}, {}, {}, {}, {}, {}],\n".format(label['file'].replace("'", "\\'"), label['time_begin'], label['time_end'], label['freq_low'], label['freq_high'], label['classid'], label['score']))
-    f.write('];' + '\n')
+    labels_data = all_labels[
+        [
+            'file', 'time_begin', 'time_end', 'freq_low', 'freq_high',
+            'classid', 'score', 'average_power_density', 'SNR',
+        ]
+    ].values.tolist()
+    f.write('var labels = ')
+    json.dump(labels_data, f, ensure_ascii=False)
+    f.write(';\n')
 
   _log(f'Finished. All results were saved in the folder {result_path}')
+  if zip:
+    archive_path = shutil.make_archive(os.path.abspath(result_path), 'zip', root_dir=result_path)
+    _log(f'Archive saved to {archive_path}')
   _log(f'{str(time.time()-t0)} used.')
   try:
     os.startfile(result_path)
@@ -862,7 +873,8 @@ def parse_opt():
   parser = argparse.ArgumentParser()
   parser.add_argument('--source', type=str, help='Source of a single file or 1-level folder')
   parser.add_argument('--model', type=str, default="", help='Version of model wights')
-  parser.add_argument('--step', type=int, default=1000, help='Length of sliding window in ms.')
+  parser.add_argument('--step', type=int, default=1500, help='Length of sliding window in ms.')
+  parser.add_argument('--workers', type=int, default=1, help='')
   parser.add_argument('--targetclasses', type=str, default='', help='filter by class, comma-separated')
   parser.add_argument('--conf_thres', type=float, default=0.1, help='Threshold of confidence score from 0.0 to 1.0')
   parser.add_argument('--savepath', type=str, default='result_silic', help='Target folder of inference results archived')

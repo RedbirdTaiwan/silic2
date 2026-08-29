@@ -11625,6 +11625,16 @@
                         <select class="form-control" id="sounds" onchange="renaudios();" multiple>
                         </select>
                         Score: <input id="threshold_min" type="number" min="0" max="1" value="0.5" step="0.01" onchange="renaudios();" style="width: 60px"> ~ <input id="threshold_max" type="number" min="0" max="1" value="1" step="0.01" onchange="renaudios();" style="width: 60px">
+                        <div class="mt-1">
+                            Avg Power Density (dB FS/Hz):
+                            <input id="power_min" type="number" step="0.1" placeholder="min" onchange="renaudios();" style="width: 72px"> ~
+                            <input id="power_max" type="number" step="0.1" placeholder="max" onchange="renaudios();" style="width: 72px">
+                        </div>
+                        <div class="mt-1 mb-1">
+                            SNR (dB):
+                            <input id="snr_min" type="number" step="0.1" placeholder="min" onchange="renaudios();" style="width: 72px"> ~
+                            <input id="snr_max" type="number" step="0.1" placeholder="max" onchange="renaudios();" style="width: 72px">
+                        </div>
                         <div class="card text-white bg-success overflow-auto" style="height:480px;">
                             <div class="card-body" style="font-size: 0.75em;">
                                 <button type="button" class="btn btn-primary btn-sm mr-1" OnClick="to_audio(this, 'Previous');">Previous</button><div class="d-inline" id="audioid"></div><button type="button" class="btn btn-primary btn-sm ml-1" OnClick="to_audio(this, 'next');">Next</button>
@@ -11638,6 +11648,8 @@
                                             <th>Fl</th>
                                             <th>Fh</th>
                                             <th>score</th>
+                                            <th>power</th>
+                                            <th>SNR</th>
                                             <th>copy</th>
                                         </tr>
                                     <tr></tr></thead>
@@ -20377,16 +20389,37 @@
         
     }
 
+    function withinOptionalRange(value, minId, maxId) {
+		var minValue = document.getElementById(minId).value;
+		var maxValue = document.getElementById(maxId).value;
+		if (minValue === '' && maxValue === '') {
+			return true;
+		}
+		var numericValue = Number(value);
+		if (!Number.isFinite(numericValue)) {
+			return false;
+		}
+		return (minValue === '' || numericValue >= Number(minValue)) &&
+			(maxValue === '' || numericValue <= Number(maxValue));
+	}
+
+	function labelMatchesFilters(label) {
+		var threshold_min = Number(document.getElementById('threshold_min').value);
+		var threshold_max = Number(document.getElementById('threshold_max').value);
+		var classMatches = ($('#sounds').val() == '') || ($('#sounds').val().includes(label[5].toString()));
+		return label[6] >= threshold_min && label[6] <= threshold_max && classMatches &&
+			withinOptionalRange(label[7], 'power_min', 'power_max') &&
+			withinOptionalRange(label[8], 'snr_min', 'snr_max');
+	}
+
     function drawlabels(audioid) {
 		labels_inact.selectAll("*").remove();
-		var threshold_min = document.getElementById('threshold_min').value;
-		var threshold_max = document.getElementById('threshold_max').value;
 		var label_table = document.getElementById('label_table');
 		while (label_table.rows.length > 1) {
 			label_table.deleteRow(-1);
 		}
 		for (var i = 0; i < labels.length; i++) {
-			if ( (labels[i][6] >= threshold_min) && (labels[i][6] <= threshold_max) && (labels[i][0] == audioid) && (($('#sounds').val() == '') || ($('#sounds').val().includes(labels[i][5].toString())))){
+			if (labels[i][0] == audioid && labelMatchesFilters(labels[i])) {
 				var s_x = 300 + labels[i][1] * perlength / 1000;
 				var s_y = 20 + 512 * (16000 - labels[i][4]) / 16000;
 				var s_h = (labels[i][4] - labels[i][3]) / 16000 * 512;
@@ -20404,7 +20437,9 @@
 				row.insertCell(4).innerHTML = labels[i][3];
 				row.insertCell(5).innerHTML = labels[i][4];
 				row.insertCell(6).innerHTML = labels[i][6];
-				row.insertCell(7).innerHTML = '<button type="button" onclick="copylabel(this);">Copy</button>';
+				row.insertCell(7).innerHTML = labels[i][7];
+				row.insertCell(8).innerHTML = labels[i][8];
+				row.insertCell(9).innerHTML = '<button type="button" onclick="copylabel(this);">Copy</button>';
 			}
 		}
 		$("#spec").attr("xlink:href", "linear/"+audioid.replace(/\.[^/.]+$/, "")+".png");
@@ -20418,12 +20453,10 @@
     }
 	
 	function renaudios(){
-		var threshold_min = document.getElementById('threshold_min').value;
-		var threshold_max = document.getElementById('threshold_max').value;
 		var audioslist = '';
 		var audios = [];
 		for (var i = 0; i < labels.length; i++) {
-			if ( (labels[i][6] >= threshold_min) && (labels[i][6] <= threshold_max) && (($('#sounds').val() == '') || ($('#sounds').val().includes(labels[i][5].toString())))) {
+			if (labelMatchesFilters(labels[i])) {
 				audioid = labels[i][0];
 				if(!audios.includes(audioid)){
 					audios.push(audioid);
@@ -20437,6 +20470,10 @@
             }
         }
 		audiolists.innerHTML = audioslist;
+		var currentAudio = document.getElementById('audioid').textContent;
+		if (currentAudio) {
+			drawlabels(currentAudio);
+		}
 	}
 
     function soundclassselection(){
@@ -20474,6 +20511,8 @@
         label += "," + labeltable.children[4].innerHTML;
         label += "," + labeltable.children[5].innerHTML;
         label += "," + labeltable.children[6].innerHTML;
+        label += "," + labeltable.children[7].innerHTML;
+        label += "," + labeltable.children[8].innerHTML;
         navigator.clipboard.writeText(label);
 		//修正chrome不安全網頁禁止使用剪貼簿 把網站設入白名單 chrome://flags/#unsafely-treat-insecure-origin-as-secure
     }
