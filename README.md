@@ -2,6 +2,9 @@
 
 Sound identification and labeling pipeline for audio and video recordings.
 
+## Species & Sound class Coverage
+- [./model/v2026.1](./model/v2026.1) , including 398 sound classes of 279 species, updated on Aug. 2026
+
 ## Setup
 
 Use Python 3.10 or newer and install the Python dependencies:
