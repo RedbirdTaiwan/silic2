@@ -1,4 +1,4 @@
-﻿sounclass_id,species_name,sound_class,scientific_name,freq_low,freq_high
+﻿soundclass_id,species_name,sound_class,scientific_name,freq_low,freq_high
 1,黑冠麻鷺,S-01,Gorsachius melanolophus,244,515
 6,八色鳥,S-01,Pitta nympha,1337,2233
 7,白耳畫眉,C-01,Heterophasia auricularis,2269,6831
