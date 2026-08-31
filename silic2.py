@@ -12,6 +12,12 @@ import cv2
 import numpy as np
 import pandas as pd
 import torch
+import matplotlib
+
+# Spectrograms are rendered to NumPy arrays, never to an interactive window.
+# Using a GUI backend (for example TkAgg) from the UI worker thread causes
+# Tk_GetPixmap failures on Windows.
+matplotlib.use("Agg", force=True)
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 from matplotlib import cm
