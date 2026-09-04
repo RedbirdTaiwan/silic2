@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import argparse
+import gc
 import json
 import mimetypes
 import os
@@ -192,6 +193,15 @@ class Silic:
     return targetmp3path
     
   def spectrogram(self, audiodata, spect_type='linear', rainbow_bands=5):
+    """Render a spectrogram and always close figures created by this call."""
+    existing_figures = set(plt.get_fignums())
+    try:
+      return self._render_spectrogram(audiodata, spect_type, rainbow_bands)
+    finally:
+      for figure_number in set(plt.get_fignums()) - existing_figures:
+        plt.close(figure_number)
+
+  def _render_spectrogram(self, audiodata, spect_type='linear', rainbow_bands=5):
     if spect_type in ['mel', 'rainbow']:
       spec = self.spec_mel_layer(audiodata)
       w = spec.size()[2]/55
@@ -280,12 +290,12 @@ class Silic:
     
     height, width, colors = self.cv2_img.shape
     #cv2.imwrite(targetfilepath, self.cv2_img)
-    PILimage = Image.fromarray(self.cv2_img)
-    try:
-      PILimage.save(targetfilepath, dpi=(72,72))
-    except OSError:
-      targetfilepath = '%spng' %targetfilepath[:-3]
-      PILimage.save(targetfilepath, dpi=(72,72))
+    with Image.fromarray(self.cv2_img) as PILimage:
+      try:
+        PILimage.save(targetfilepath, dpi=(72,72))
+      except OSError:
+        targetfilepath = '%spng' %targetfilepath[:-3]
+        PILimage.save(targetfilepath, dpi=(72,72))
     print('Spectrogram was saved to %s.'%targetfilepath)
     return targetfilepath
 
@@ -317,9 +327,13 @@ class Silic:
         ).T.to_dict()
     #print(self.model.names)
     if targetfilepath and os.path.exists(targetfilepath):
-        self.rainbow_img = np.array(Image.open(targetfilepath).convert("RGB"))[:, :, ::-1]
+        with Image.open(targetfilepath) as source_image:
+          with source_image.convert("RGB") as rgb_image:
+            self.rainbow_img = cv2.cvtColor(np.asarray(rgb_image), cv2.COLOR_RGB2BGR)
     else:
         self.tfr(targetfilepath=targetfilepath, spect_type='rainbow')
+    # Detection only needs rainbow_img. Do not retain a second full-size image.
+    self.cv2_img = None
 
     def iter_clips():
         """Yield one spectrogram window at a time to keep memory bounded."""
@@ -392,19 +406,28 @@ class Silic:
 
     return labels
 
+  def release_file_resources(self):
+    """Release buffers for the current audio file while keeping the model cached."""
+    for attribute in (
+        'audiodata', 'sound', 'original_sound', 'analysis_audio',
+        'cv2_img', 'rainbow_img', 'original_metadata',
+    ):
+      if hasattr(self, attribute):
+        setattr(self, attribute, None)
+
 def signal_power(audio, start_time, end_time, low_freq, high_freq):
   sr = audio.frame_rate
 
   # 取得 bit depth
   bit_depth = audio.sample_width * 8
 
-  # 將音訊轉換為 NumPy 陣列
-  samples = np.array(audio.get_array_of_samples())
+  # Only convert the detected interval; copying the full recording for every
+  # detection causes large transient allocations in long batch runs.
+  start_ms = max(0, int(start_time * 1000))
+  end_ms = min(len(audio), int(end_time * 1000))
+  samples = np.asarray(audio[start_ms:end_ms].get_array_of_samples())
 
-  # 設定特定時間範圍（以秒為單位）
-  start_sample = int(start_time * sr)
-  end_sample = int(end_time * sr)
-  y_segment = samples[start_sample:end_sample]
+  y_segment = samples
   if y_segment.size < 2:
     return 'error', 'error'
 
@@ -575,24 +598,24 @@ def draw_labels(silic, labels, outputpath=None):
       os.makedirs(os.path.join(silic.audiopath, 'labels'))
     targetpath = os.path.join(silic.audiopath, 'labels', '%s.png'%silic.audiofilename_without_ext)
   outputimage = silic.tfr()
-  img_pil = Image.open(outputimage)
-  width, height = img_pil.size
-  fontpath = os.path.join(PROJECT_DIR, 'model', 'wt011.ttf')
-  font = ImageFont.truetype(fontpath, 9)
-  draw = ImageDraw.Draw(img_pil)
-  for index, label in labels.iterrows():
-    x1 = round(label['time_begin']/silic.duration*width)
-    x2 = round(label['time_end']/silic.duration*width)
-    y1 = round((1-label['freq_high']/(silic.sr/2))*height)
-    y2 = round((1-label['freq_low']/(silic.sr/2))*height)
-    tag = '%s%s(%.3f)' %(label['species_name'], label['sound_class'], label['score'])
-    draw.text((x1, y1-12),  tag, font = font, fill = 'red')
-    draw.rectangle(((x1, y1), (x2, y2)), outline='red')
-  try:
-    img_pil.save(targetpath)
-  except OSError:
-    targetpath = '%spng' %targetpath[:-3]
-    img_pil.save(targetpath)
+  with Image.open(outputimage) as img_pil:
+    width, height = img_pil.size
+    fontpath = os.path.join(PROJECT_DIR, 'model', 'wt011.ttf')
+    font = ImageFont.truetype(fontpath, 9)
+    draw = ImageDraw.Draw(img_pil)
+    for index, label in labels.iterrows():
+      x1 = round(label['time_begin']/silic.duration*width)
+      x2 = round(label['time_end']/silic.duration*width)
+      y1 = round((1-label['freq_high']/(silic.sr/2))*height)
+      y2 = round((1-label['freq_low']/(silic.sr/2))*height)
+      tag = '%s%s(%.3f)' %(label['species_name'], label['sound_class'], label['score'])
+      draw.text((x1, y1-12),  tag, font = font, fill = 'red')
+      draw.rectangle(((x1, y1), (x2, y2)), outline='red')
+    try:
+      img_pil.save(targetpath)
+    except OSError:
+      targetpath = '%spng' %targetpath[:-3]
+      img_pil.save(targetpath)
   #img_pil.show()
   print(targetpath, 'saved')
   return targetpath
@@ -644,46 +667,52 @@ def _write_raven_table(labels, target_path):
 
 def _run_one_file(silic, audiofile, result_paths, conf_thres, step, targetclasses):
   """Process one recording; shared by serial and multiprocessing execution."""
-  linear_path, rainbow_path, label_path, raven_path, audio_path = result_paths
-  silic.audio(audiofile)
+  try:
+    linear_path, rainbow_path, label_path, raven_path, audio_path = result_paths
+    silic.audio(audiofile)
 
-  if audio_path:
-    target_audio = os.path.join(audio_path, silic.audiofilename)
-    if os.path.abspath(audiofile) != os.path.abspath(target_audio):
-      shutil.copy2(audiofile, target_audio)
+    if audio_path:
+      target_audio = os.path.join(audio_path, silic.audiofilename)
+      if os.path.abspath(audiofile) != os.path.abspath(target_audio):
+        shutil.copy2(audiofile, target_audio)
 
-  linear_png = os.path.join(linear_path, silic.audiofilename_without_ext + '.png')
-  if not os.path.exists(linear_png):
-    silic.tfr(targetfilepath=linear_png, spect_type='linear')
+    linear_png = os.path.join(linear_path, silic.audiofilename_without_ext + '.png')
+    if not os.path.exists(linear_png):
+      silic.tfr(targetfilepath=linear_png, spect_type='linear')
 
-  rainbow_png = os.path.join(rainbow_path, silic.audiofilename_without_ext + '.png')
-  labels = silic.detect(
-      weights=silic.model_path,
-      step=step,
-      targetclasses=targetclasses,
-      conf_thres=conf_thres,
-      targetfilepath=rainbow_png,
-  )
-  if len(labels) == 1:
+    rainbow_png = os.path.join(rainbow_path, silic.audiofilename_without_ext + '.png')
+    labels = silic.detect(
+        weights=silic.model_path,
+        step=step,
+        targetclasses=targetclasses,
+        conf_thres=conf_thres,
+        targetfilepath=rainbow_png,
+    )
+    if len(labels) == 1:
+      return {
+          'audiofile': audiofile, 'found': 0, 'species': 0, 'csv_path': None,
+          'message': f'No sound found in {audiofile}.',
+      }
+
+    newlabels = clean_multi_boxes(audiofile, labels, audio=silic.analysis_audio)
+    newlabels['file'] = silic.audiofilename
+    csv_path = os.path.join(label_path, silic.audiofilename_without_ext + '.csv')
+    newlabels.to_csv(csv_path, index=False, encoding='utf-8-sig')
+    raven_path_txt = os.path.join(raven_path, silic.audiofilename_without_ext + '_selections.txt')
+    _write_raven_table(newlabels, raven_path_txt)
+    species = int(newlabels['classid'].nunique())
     return {
-        'audiofile': audiofile, 'found': 0, 'species': 0, 'csv_path': None,
-        'message': f'No sound found in {audiofile}.',
+        'audiofile': audiofile,
+        'found': int(newlabels.shape[0]),
+        'species': species,
+        'csv_path': csv_path,
+        'message': f'{newlabels.shape[0]} sounds of {species} species is/are found in {audiofile}',
     }
-
-  newlabels = clean_multi_boxes(audiofile, labels, audio=silic.analysis_audio)
-  newlabels['file'] = silic.audiofilename
-  csv_path = os.path.join(label_path, silic.audiofilename_without_ext + '.csv')
-  newlabels.to_csv(csv_path, index=False, encoding='utf-8-sig')
-  raven_path_txt = os.path.join(raven_path, silic.audiofilename_without_ext + '_selections.txt')
-  _write_raven_table(newlabels, raven_path_txt)
-  species = int(newlabels['classid'].nunique())
-  return {
-      'audiofile': audiofile,
-      'found': int(newlabels.shape[0]),
-      'species': species,
-      'csv_path': csv_path,
-      'message': f'{newlabels.shape[0]} sounds of {species} species is/are found in {audiofile}',
-  }
+  finally:
+    silic.release_file_resources()
+    gc.collect()
+    if str(silic.device).startswith('cuda') and torch.cuda.is_available():
+      torch.cuda.empty_cache()
 
 def _process_one_file(args):
   """
